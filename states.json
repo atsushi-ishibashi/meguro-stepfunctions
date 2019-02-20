@@ -1,0 +1,171 @@
+{
+  "StartAt": "Start Meguro",
+  "States": {
+    "Start Meguro": {
+      "Type": "Task",
+      "Resource": "<arn scan lambda>",
+      "ResultPath": "$.List",
+      "Next": "For Loop Condition"
+    },
+    "For Loop Condition": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.List[0]",
+            "StringEquals": "DONE"
+          },
+          "Next": "Read from DynamoDB"
+        },
+        {
+          "Variable": "$.List[0]",
+          "StringEquals": "DONE",
+          "Next": "Run Fargate"
+        }
+      ]
+    },
+    "Read from DynamoDB": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Parameters": {
+        "TableName": "<table name>",
+        "Key": {
+          "id": {"N.$": "$.List[0]"}
+        }
+      },
+      "ResultPath": "$.DynamoDB",
+      "Next": "Send to SQS"
+    },
+    "Send to SQS": {
+     "Type": "Task",
+     "Resource": "arn:aws:states:::sqs:sendMessage",
+     "Parameters": {
+       "QueueUrl": "<sqs url>",
+       "MessageBody.$": "$.DynamoDB.Item"
+     },
+      "ResultPath": "$.SQS",
+     "Next": "Pop Element from List"
+    },
+    "Pop Element from List": {
+      "Type": "Pass",
+      "Parameters": {
+        "List.$": "$.List[1:]"
+      },
+      "Next": "For Loop Condition"
+    },
+    "Run Fargate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "ResultPath": "$.ECS",
+      "Parameters": {
+        "Cluster": "<cluster name>",
+        "TaskDefinition": "<task definition>",
+        "LaunchType": "FARGATE",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "ENABLED",
+            "SecurityGroups": ["<sg>"],
+            "Subnets": ["<subnet>"]
+          }
+        }
+      },
+     "Next": "Glue StartJobRun"
+    },
+    "Glue StartJobRun": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "ResultPath": "$.Glue",
+      "Parameters": {
+        "JobName": "<job name>"
+      },
+      "Next": "Batch Run"
+    },
+    "Batch Run": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::batch:submitJob.sync",
+      "Parameters": {
+        "JobName": "<job name>",
+        "JobQueue": "<queue arn>",
+        "JobDefinition": "<job definition arn>"
+      },
+      "ResultPath": "$.Batch",
+      "Next": "Training"
+    },
+    "Training": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sagemaker:createTrainingJob.sync",
+      "ResultPath": "$.Sagemaker",
+      "Parameters": {
+        "TrainingJobName": "<job name>",
+        "AlgorithmSpecification": {
+          "TrainingImage": "351501993468.dkr.ecr.ap-northeast-1.amazonaws.com/linear-learner:1",
+          "TrainingInputMode": "File"
+        },
+        "ResourceConfig": {
+          "InstanceCount": 1,
+          "InstanceType": "ml.m5.large",
+          "VolumeSizeInGB": 10
+        },
+        "RoleArn": "<role arn>",
+        "InputDataConfig": [{
+            "ChannelName": "train",
+            "DataSource": {
+              "S3DataSource": {
+                "S3DataType": "S3Prefix",
+                "S3Uri": "<s3 path>",
+                "S3DataDistributionType": "ShardedByS3Key"
+              }
+            },
+            "CompressionType": "None",
+            "RecordWrapperType": "None"
+          },
+          {
+            "ChannelName": "validation",
+            "DataSource": {
+              "S3DataSource": {
+                "S3DataType": "S3Prefix",
+                "S3Uri": "<s3 path>",
+                "S3DataDistributionType": "FullyReplicated"
+              }
+            },
+            "CompressionType": "None",
+            "RecordWrapperType": "None"
+          }
+
+        ],
+        "OutputDataConfig": {
+          "S3OutputPath": "<s3 path>"
+        },
+        "HyperParameters": {
+          "feature_dim": "30",
+          "mini_batch_size": "20",
+          "predictor_type": "regressor",
+          "epochs": "10",
+          "num_models": "32",
+          "loss": "absolute_loss"
+        },
+        "StoppingCondition": {
+          "MaxRuntimeInSeconds": 3600
+        }
+      },
+      "ResultPath": "$.Sagemaker",
+      "Next": "SageLambda"
+    },
+    "SageLambda": {
+      "Type": "Task",
+      "Resource": "<arn sagemaker lambda>",
+      "InputPath": "$.Sagemaker",
+      "ResultPath": "$.SageLambda",
+      "Next": "Notify Finish"
+    },
+    "Notify Finish": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "Message.$": "$.SageLambda",
+        "TopicArn": "<topic arn>"
+      },
+      "End": true
+    }
+  }
+}
